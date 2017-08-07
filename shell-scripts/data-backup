@@ -1,0 +1,347 @@
+#!/bin/bash
+
+# Create data backup
+# Author: Georgi Kovachev
+  Version=1.0.6
+
+# This program is intended for data backup.
+# Uses a configuration file in user's home directory.
+
+
+PATH=/bin:/usr/bin
+
+ME=$(basename "$0")				# program name as invoked
+SELF=$(readlink -ve "$0") || exit 1		# /full/path/to/program
+SELFDIR=$(dirname   "$SELF")			# /full/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------
+config_file=~/.kassandra/${SELFNAME}.conf	# important! /home/user/.pkg/progname.conf
+backup_file=''			# must be set in "config_file" -> [options]
+# defaults - if not set in "config_file" -> [options]
+prefix=''			# old backups prefix
+suffix='-'			# old backups suffix
+backups_count=1			# old backups count
+default_action=''		# default action - if no parameter is supplied
+# configuration end =========
+
+action=''			# what to do?
+tar_list=''			# files and directories for backup
+es=0
+
+
+# load required files
+[ -f "${SELFDIR}/functions.sh"  -a  -r "${SELFDIR}/functions.sh" ] \
+	&& . "${SELFDIR}/functions.sh" || \
+	{
+		echo -n "$ME: FATAL ERROR: ${SELFDIR}/functions.sh"
+		echo -e " cannot be loaded. Aborting. \n" >&2
+		exit 1
+	}
+
+
+# Checks input parameters
+# Input:  $@ - command line
+# Output: $action is set to appropriate value
+# Exit status: 0
+get_cmd_line_parameters ()
+{
+	while [ $# -ne 0 ]; do
+		case "$1" in
+			--full|--incremental|--list|--difference|--version)
+				if [ -z "$action" ]; then
+					action=$1;
+				else
+					if [ "$1" = "$action" ]; then
+				echo "$ME: Duplicate parameter  ${1}" >&2
+					else
+				echo "$ME: Unexpected parameter  ${1}" >&2
+					fi
+					action="Invalid input"
+				fi
+			;;
+			*)
+				echo "$ME: Illegal parameter  ${1}" >&2
+				action="Invalid input"
+			;;
+		esac
+		shift
+	done
+	[ -z "$action" ] && action=$default_action
+	return 0
+}
+
+
+# Here initial configuration file on the fly
+# Input:  None
+# Output: None
+# Exit status: 0 if success, 1 if error
+here_config_file ()
+{
+	cat << EOConfF  > "$config_file" || return 1
+# Configuration file "$config_file"
+# for "$SELFNAME" utility
+# This file is created automatically if one does not exist.
+# If it exists it is not modified by the program in any way.
+#
+# Comments begin with '#' mark.
+# Blank lines are ignored.
+
+
+# Options format is "option=value"
+
+[options]
+# Backup file must be set. It is a tar archive.
+# backup_file=/full/path/file-name.tar
+backup_file	= $backup_file
+
+# Next are optional
+# Prefix for old backups, e.g.
+# prefix=old-
+prefix		= $prefix
+
+# Suffix for old backups. Will be followed by a number, starting from 1.
+suffix		= $suffix
+
+# Old backups count
+backups_count	= $backups_count
+
+# Default command line option, if not supplied. Example:
+# default_action=--incremental
+default_action	= $default_action
+
+
+# List of files and directories to be included in backup.
+[files]
+# /full/path/to/file		# only the specified file will be included
+				# in backup
+# /full/path/to/directory	# all directoty entry will be included
+				# in backup, recursively
+
+
+
+EOConfF
+}
+
+
+# Read settings from config file
+# Input:  None
+# Output: None
+# Exit status: 0 if success, greater than 0 if error
+get_configuration_settings ()
+{
+	local config_file_entry='' section='' i='' keep_IFS=$IFS es=0
+
+	if [ ! -e "$config_file" ]; then
+		here_config_file || return 1
+		es=3			# config file created, needs update
+	fi
+	# get configuration settings
+	config_file_entry=$(remove_comments_from_file "$config_file") || return 2
+
+	IFS=$'\n'			# set input field separator to new line
+	for i in $config_file_entry; do
+		if [ "$i" = '[options]'  -o  "$i" = '[files]' ]; then
+			section=$i
+			continue
+		fi
+
+		if [ "$section" = '[options]' ]; then
+			i=$(name_eq_value "$i")	# trim needless white space
+			case "$i" in
+				backup_file=*)
+					backup_file=${i#backup_file=};;
+				prefix=*)
+					prefix=${i#prefix=};;
+				suffix=*)
+					suffix=${i#suffix=};;
+				backups_count=*)
+					backups_count=${i#backups_count=};;
+				default_action=*)
+					default_action=${i#default_action=};;
+			esac
+		fi
+
+		if [ "$section" = '[files]' ]; then
+			tar_list=${tar_list}"$i"$'\n'
+		fi
+	done
+	IFS=$keep_IFS
+	return $es
+}
+
+
+# Print info for non existing files
+# Input:  None
+# Output: Non existing files
+# Exit status: 0
+print_non_existing ()
+{
+	local tar_list_conf=$tar_list flag=0 i='' keep_IFS=$IFS
+
+	tar_list=''
+	IFS=$'\n'			# set input field separator to new line
+	for i in $tar_list_conf; do
+		if [ -e "$i" ]; then
+			tar_list=${tar_list}"$i"$'\n'
+		else
+			echo "$ME: WARNING: $i - does not exist"
+			flag=1
+		fi
+	done
+	IFS=$keep_IFS
+	[ $flag -eq 1 ] && { sleep 3; echo ''; }
+	return 0
+}
+
+
+# Checks if backup file exist, is it a tar archive,
+# is it readable and is it's directory writable
+# Input:  None
+# Output: None
+# Exit status: 0 if success, 1 if error
+config_check ()
+{
+	case "$action" in
+		--full|--incremental|--list|--difference)	: ;;
+		*)	return 0;;	# --version, --help, ...
+	esac
+
+	# check if config file is loaded
+	if [ "$config_status" -eq 1 ]; then
+		echo -n "$ME: Cannot create configuration" >&2
+		echo " file ${config_file}. Aborting." >&2
+		return 1
+	fi
+	if [ "$config_status" -eq 2 ]; then
+		echo -n "$ME: Cannot read configuration" >&2
+		echo " file ${config_file}. Aborting." >&2
+		return 1
+	fi
+	if [ "$config_status" -eq 3 ]; then
+		echo "$ME: Configuration file \"${config_file}\" just created." >&2
+		echo -n "$ME: Please open it with your favorite text editor" >&2
+		echo " and adjust the settings to fit your needs." >&2
+		echo -e "$ME: The parameter \"backup_file\" is mandatory. \n" >&2
+		return 1
+	fi
+
+	# backup file must be set
+	if [ -z "$backup_file" ]; then
+		echo -n "$ME: Error: Backup file $backup_file is" >&2
+		echo -e " not set in $config_file \n" >&2
+		return 1
+	fi
+	[ "$action" = --list  -o  "$action" = --difference ] && return 0
+
+	# tar list must contain something
+	[ -z "$tar_list" ] && \
+		{ echo "$ME: Error: No files to be backed up" >&2; return 1; }
+
+	# directory must exist and must be writable
+	local dir=$(dirname "$backup_file")
+	[ ! -d "$dir" ] && \
+		{ echo "$ME: Error: Directory $dir does not exist" >&2; return 1; }
+	[ ! -w "$dir" ] && \
+		{ echo "$ME: Error: Directory $dir is not writable" >&2; return 1; }
+
+	# if full - backup file does not need to exist, to be readable
+	# or to be a tar archive - it will be rewriten
+	[ "$action" = --full ] && return 0
+
+	# if file exist a read permission must be granted
+	if [ -f "$backup_file"  -a  ! -r "$backup_file" ]; then
+		echo "$ME: Error: Cannot read $backup_file - permission denied" >&2
+		return 1
+	fi
+	# if file exist it must be a tar archive (now it is readable)
+	if [ -e "$backup_file" ] && ! tar -tf "$backup_file" &>/dev/null; then
+	echo "$ME: Error: File $backup_file does not look like a tar archive" >&2
+		return 1
+	fi
+}
+
+
+# all functions are now loaded
+
+get_configuration_settings
+config_status=$?		# save exit status
+
+# check input parameters
+get_cmd_line_parameters "$@"
+
+# all checks are now done, there must be no errors
+# all exit codes are expected do be 0 - exit if not so
+set -e
+
+config_check		# can the configuration satisfy the requirements?
+
+
+
+# move up to action: do what is needed
+case "$action" in
+	--full)
+		print_non_existing
+		rotate_backups "$backup_file" "$prefix" "$suffix" "$backups_count"
+
+		echo "$ME: Starting Full Backup..."
+		[ -f "$backup_file" ] && chmod u+w "$backup_file"
+		keep_IFS=$IFS;	IFS=$'\n'	# because of $tar_list
+		set -vx
+		tar -cvPf "$backup_file" $tar_list --one-file-system
+		set +vx
+		IFS=$keep_IFS
+		chmod 444 "$backup_file"
+		echo Done
+	;;
+
+	--incremental)
+		print_non_existing
+
+		echo "$ME: Starting Incremental Backup..."
+		[ -f "$backup_file" ] && chmod u+rw "$backup_file"
+		keep_IFS=$IFS;	IFS=$'\n'	# because of $tar_list
+		set -vx
+ 		tar -uvPf "$backup_file" $tar_list --one-file-system
+		set +vx
+		IFS=$keep_IFS
+		chmod 444 "$backup_file"
+		echo Done
+	;;
+
+	--list)
+		echo "$ME: Listing archive $backup_file"
+		set -vx
+		tar -tvPf "$backup_file"
+		set +vx
+		echo Done
+	;;
+
+	--difference)
+		print_non_existing
+
+		echo -n "$ME: Searching for Differences between $backup_file and"
+		echo " filesystem..."
+		set -vx
+		tar -dvPf "$backup_file" | grep -E ' differs$' || :
+		set +vx
+		echo Done
+	;;
+
+	--version)
+		echo -e "$ME version: $Version \n"
+	;;
+
+	*)
+		echo -n "Usage: $0 {--full | [--incremental] | --list |" >&2
+		echo " --difference | --version}" >&2
+		exit 1
+	;;
+esac
+	[ "$action" != --version ] && \
+		echo -e "Current backup file: $backup_file \n"
+
+
+exit 0
+

@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# Get random string
+# Author: Georgi Kovachev
+  Version=1.0.3
+
+# This program is intended for password generation.
+
+set -e
+PATH=/bin:/usr/bin
+
+ME=$(basename "$0")				# program name as invoked
+SELF=$(readlink -ve "$0") || exit 1		# /full/path/to/program
+SELFDIR=$(dirname   "$SELF")			# /full/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------
+size=64				# string length
+# configuration end =========
+
+cmd="$1"			# what to do?
+
+
+# load required files
+[ -f "${SELFDIR}/functions.sh"  -a  -r "${SELFDIR}/functions.sh" ] \
+	&& . "${SELFDIR}/functions.sh" || \
+	{
+		echo -n "$ME: FATAL ERROR: ${SELFDIR}/functions.sh" >&2
+		echo " cannot be loaded. Aborting." >&2
+		exit 1
+	}
+
+
+# move up to action: do what is needed
+case "$cmd" in
+	--version)
+		echo "$ME version: $Version"
+	;;
+
+	*)
+		sz=$(str2int "$1") || sz=$size
+		echo ''
+		echo "Random string "$sz": $(random_string "$sz" "$2")"
+		echo ''
+	;;
+esac
+
+
+exit 0
+

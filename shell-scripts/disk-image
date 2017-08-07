@@ -1,0 +1,423 @@
+#!/bin/sh
+
+# Create/restore disk image
+# Author: Georgi Kovachev
+  Version=1.0.5
+
+# Creates compressed disk image using gzip.
+# For best compression disk can be optionaly cleaned up
+# by filling the free space with zeros. To do this
+# the disk must be mounted, e.g. containing filesystem.
+# Works also on files containing filesystem.
+
+set -e ; sync
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+ME=$(basename "$0")		# program name as invoked
+
+cmd=''
+source=''
+destination=''
+cleanup=0
+mount_point=''
+
+
+# Must be root
+if [ "$(/usr/bin/id -u)" != "0" ]; then
+	echo "$ME: You must be root to run this script." >&2
+	exit 1
+fi
+
+
+# Checks input parameters
+# Input:  $@ - command line
+# Output: $cmd is set to appropriate value
+# Exit status: 0 if success, 1 if error
+get_cmd_line_parameters ()
+{
+	local nc='' es=0
+
+# If option -m is not supported by readlink command, use option -f
+	readlink_m_f ()
+	{
+		local res=''
+
+		res=$(readlink -m "$1" 2>/dev/null) || \
+		res=$(readlink -f "$1" 2>/dev/null)
+
+		echo "$res"
+	}
+
+
+	cmd=$1					# create	restore
+	source=$(readlink_m_f "$2")		# device	file
+	destination=$(readlink_m_f "$3")	# file		device
+	nc=$4					# --no-cleanup
+
+	cleanup=0
+	case "$cmd" in
+		create)
+			destination=${destination%.gz}		# gzip format
+			destination=${destination%.img}.img.gz	# image
+
+			if [ $# -gt 4 ]; then
+				echo "$ME: Too many parameters" >&2; es=1
+			fi
+			if [ $# -gt 3  -a  "$nc" != "--no-cleanup" ]; then
+				echo "$ME: Illegal parameter  $nc" >&2
+				es=1
+			fi
+			[ $# -eq 3 ] && cleanup=1
+		;;
+		restore)
+			if [ $# -gt 3 ]; then
+				echo "$ME: Too many parameters" >&2; es=1
+			fi
+		;;
+	esac
+
+	return $es
+}
+
+
+# Get correspondence between device and mount point
+# Input:  $1, $2 - device name or mount point (e.g. /dev/hda1 or /mnt)
+#	  $3     - file list (e.g. /etc/fstab, /etc/mtab, /proc/mounts)
+# Output: device name or mount point (e.g. /dev/hda1 or /mnt)
+#	  returns the last entry if found, empty string otherwise
+# Exit status: 0 if success, greater than 0 if error
+# Examples:
+# get_mounts /dev/hda1 ''        /etc/mtab	; result: /mnt/hda1 - mount point
+# get_mounts /mnt/hda1 ''        /etc/mtab	; result: /mnt/hda1 - mount point
+# get_mounts ''        /dev/hda1 /etc/mtab	; result: /dev/hda1 - device
+# get_mounts ''        /mnt/hda1 /etc/mtab	; result: /dev/hda1 - device
+# get_mounts /dev/hda1 /dev/hda1 /etc/mtab	; result: /mnt/hda1 - mount point
+# get_mounts /mnt/hda1 /mnt/hda1 /etc/mtab	; result: /dev/hda1 - device
+# get_mounts /dev/hda1 /mnt/hda1 /etc/mtab	; result: /mnt/hda1 - mount point
+# get_mounts /mnt/hda1 /dev/hda1 /etc/mtab	; result: /dev/hda1 - device
+get_mounts ()
+{
+	local p1="$1" p2="$2" in_file=''
+
+	shift 2
+
+	# must be a regular file with read permission granted
+	[ -n "$*" ] || return 1
+	for in_file in $*; do
+		[ -f "$in_file"  -a  -r "$in_file" ] || return 1
+	done
+
+	sync
+	awk -v p1="$p1" -v p2="$p2"	'
+	{
+		sub(/^[ \t]*#.*/, "")	# remove entire commented lines
+		if ((p1 == $1) && ((p2 == "") || (p2 == $1)))	res = $2
+		if ((p1 == $2) && ((p2 == "") || (p2 == $1)))	res = $2
+		if ((p2 == $1) && ((p1 == "") || (p1 == $2)))	res = $1
+		if ((p2 == $2) && ((p1 == "") || (p1 == $2)))	res = $1
+		if ((p1 == $1) && ((p2 == "") || (p2 == $2)))	res = $2
+	}
+	END	{	print res	}
+	' $* || return 2
+}
+
+
+# Checks if the configuration satisfy the requirements
+# Input:  None
+# Output: None
+# Exit status: 0 if success, 1 if error
+config_check ()
+{
+	local tmp='' es=0
+
+	is_mounted ()
+	{
+		[ "$cmd" = "create" ] && tmp='Source' || tmp='Destination'
+
+		if [ -d "$mount_point" ]; then
+			if [ $es -eq 0 ]; then
+	echo "$ME: WARNING: $tmp $1 is mounted on $mount_point"
+	echo -n "$ME: Proceed? [Yes|No] (default No): "
+				[ "$(read ans; echo "$ans")" != "Yes" ] && es=1
+			else
+	echo "$ME: WARNING: $tmp $1 is mounted on $mount_point" >&2
+			fi
+		fi
+	}
+
+
+	case "$cmd" in
+		create)
+			mount_point=$(get_mounts "$source" '' /etc/mtab) || es=1
+
+			# verify source
+			if [ -b "$source"  -o  -f "$source" ] \
+			&& [ -r "$source" ]; then
+				tmp=$(dd count=1 if="$source" 2>/dev/null \
+				| sed s/\\x00/0/g)
+				if [ -z "$tmp" ]; then
+	echo "$ME: Cannot read from source $source" >&2
+					es=1
+				fi
+			else
+	echo "$ME: Source $source must be a block device or regular file" \
+		"with read permission granted" >&2
+				es=1
+			fi
+
+			# if cleanup - source must not be mounted
+			if [ "$cleanup" = 1 ]; then
+				if [ -d "$mount_point" ]; then
+	echo "$ME: Source is mounted on ${mount_point}." >&2
+	echo "$ME: In order to cleanup the device it must not be mounted." >&2
+					es=1
+				elif [ -n "$mount_point" ]; then
+	echo "$ME: FATAL ERROR. Aborting." >&2
+	echo '' >&2
+					exit 1
+				else
+					# $mount_point is ''
+					# need location to create it
+					if [ ! -d /tmp ]; then
+	echo "$ME: Directory /tmp does not exist" >&2
+						es=1
+					fi
+					if ! [ -r /tmp  -a  -w /tmp ]; then
+	echo "$ME: Cannot access /tmp directory -" \
+		"read or write permission not granted" >&2
+						es=1
+					fi
+				fi
+			else
+				is_mounted "$source"	# WARNING if mounted
+			fi
+
+			# verify destination
+			tmp=$(dirname "$destination")
+			if [ -e "$destination" ]; then
+	echo "$ME: Destination $destination exists. Will NOT overwrite it!" >&2
+				es=1
+			elif [ -d "$tmp" ]; then
+				if ! [ -w "$tmp"  -a  -x "$tmp" ]; then
+	echo "$ME: Cannot access destination directory $tmp" >&2
+					es=1
+				fi
+			else
+				if mkdir -p -m 700 "$tmp"; then
+					if ! rm -r "$tmp"; then
+	echo "$ME: FATAL ERROR: Aborting." >&2
+	echo '' >&2
+						exit 1
+					fi
+				else
+	echo "$ME: Cannot create destination directory $tmp" >&2
+					es=1
+				fi
+			fi
+		;;
+
+		restore)
+			mount_point=$(get_mounts "$destination" '' /etc/mtab) || es=1
+
+			# verify source
+			if ! [ -f "$source"  -a  -r "$source" ]; then
+	echo "$ME: Source $source must be a regular file" \
+		"with read permission granted" >&2
+				es=1
+			fi
+
+			# verify destination
+			if [ -f "$destination"  -a  -w "$destination" ]; then
+				:
+			elif [ -b "$destination"  -a  -w "$destination" ]; then
+				if [ -r "$destination" ]; then
+					tmp=$(dd count=1 if="$destination" \
+					2>/dev/null | sed s/\\x00/0/g)
+					if [ -z "$tmp" ]; then
+	echo "$ME: Cannot access destination device $destination" >&2
+						es=1
+					fi
+				else
+					if [ $es -eq 0 ]; then
+	echo "$ME: WARNING: Cannot verify destination device $destination"
+	echo -n "$ME: Proceed? [Yes|No] (default No): "
+				[ "$(read ans; echo "$ans")" != "Yes" ] && es=1
+					else
+	echo "$ME: WARNING: Cannot verify destination device $destination" >&2
+					fi
+				fi
+			else
+	echo "$ME: Destination $destination must be a block device or" \
+		"regular file with write permission granted" >&2
+				es=1
+			fi
+
+			is_mounted "$destination"	# WARNING if mounted
+		;;
+	esac
+
+	if [ $es -eq 0 ]; then
+		if [ "$cmd" = "create"  -o  "$cmd" = "restore" ]; then
+			echo "$ME: Summary:"
+			echo "    Action:       $cmd"
+			echo "    Source        $source"
+			echo "    Destination:  $destination"
+			[ "$cmd" = "create" ] && \
+				echo "    Cleanup:      $cleanup"
+			echo ''
+			echo -n "    OK to proceed? [Yes|No] (default No): "
+			if [ "$(read ans; echo "$ans")" != "Yes" ]; then
+				echo "$ME: Terminating."
+				echo ''
+				exit 0
+			fi
+		fi
+	else
+		echo "$ME: ERRORS FOUND" >&2
+	fi
+
+	return $es
+}
+
+
+do_create ()
+{
+	if [ ! -d $(dirname "$destination") ]; then
+		mkdir -pm 700 $(dirname "$destination")
+	fi
+	sync
+	gzip -c --fast <"$source"  >"$destination"
+	sync
+}
+
+do_restore ()
+{
+	sync
+	gunzip -c "$source" > "$destination"
+	sync
+}
+
+do_cleanup ()
+{
+	local zero_dir='' free_sp='' dir='' i
+
+	free_space ()
+	{
+		free_sp=$(df -B $1 --sync "$mount_point" \
+			| grep -E "$source" | awk '{print $4}')
+
+		[ -z "$free_sp" ] && free_sp=0
+		[ $free_sp -ne 0 ] && free_sp=$((free_sp - 1))
+		echo "$free_sp"
+	}
+
+	mk_tmp_dir ()
+	{
+		i=0
+		while [ $i -lt 16 ]; do
+			dir=${1}$((RANDOM + $$ + ${i}${i})).tmp
+			mkdir -m 700 "$dir" &>/dev/null && break
+			i=$((i+1))
+		done
+		[ $i -ne 16 ] && echo "$dir"
+	}
+
+	print_info ()
+	{
+		if [ -n "$1" ]; then
+			echo
+			df -k --sync "$mount_point"
+		else
+			df -k --sync "$mount_point" | grep -E "$source"
+		fi
+	}
+
+
+	[ -z "$mount_point" ]		# ensure the mount point does not exist
+
+	# get mount point on /tmp
+	mount_point=$(mk_tmp_dir /tmp/${ME}-)
+	mount "$source" "$mount_point"
+
+	print_info 'Show Header'
+
+	# if there is any free space - create unique tmp directory
+	if [ $(free_space 1K) -ne 0 ]; then
+		# get unique temporary directory name on target device
+		zero_dir=$(mk_tmp_dir "$mount_point/zd")
+		# reserve directory entry for 1 file, index 0
+		touch "$zero_dir/zr0.tmp"
+	fi
+
+	# fill disk space with 0s in files
+	i=1				# init index
+	while [ $(free_space 8M) -gt 64 ]; do
+		# use large blocks
+		dd bs=8M count=64 if=/dev/zero of="$zero_dir/zr${i}.tmp" &>/dev/null
+		print_info
+		i=$((i+1))		# update index
+	done
+
+	# if there is any free space
+	if [ $(free_space 1K) -ne 0 ]; then
+		# fill file
+		dd bs=1K count=$(free_space 1K) \
+			if=/dev/zero of="$zero_dir/zr0.tmp" &>/dev/null
+		print_info
+	fi
+
+	# if unique temporary directory exists - free all 0s space
+	[ -d "$zero_dir" ] && rm -r "$zero_dir"
+	print_info
+
+	umount "$source"
+	rm -r "$mount_point"		# remove temporary directory
+}
+
+
+##############################
+
+# check input parameters
+get_cmd_line_parameters "$@" || cmd='invalid input, show -usage-'
+
+# can the configuration satisfy the requirements?
+config_check || cmd='invalid input, show -usage-'
+
+
+# move up to action: do what is needed
+sync
+case "$cmd" in
+	create)
+		if [ "$cleanup" = 1 ]; then
+			echo "$ME: Cleaning up source filesystem... "
+			do_cleanup
+			echo ''
+		fi
+		echo -n "$ME: Creating image... "
+		do_create
+		echo "done"
+		echo ''
+	;;
+
+	restore)
+ 		echo -n "$ME: Restoring from image... "
+		do_restore
+		echo "done"
+		echo ''
+	;;
+
+	--version)
+		echo "$ME version: $Version"
+	;;
+
+	*)
+		echo "Usage: $0  create  source " \
+			"destination_file  [--no-cleanup]" >&2
+		echo "Usage: $0  restore  source_file  destination" >&2
+		echo '' >&2
+		exit 1
+	;;
+esac
+
+sync
+exit 0
+

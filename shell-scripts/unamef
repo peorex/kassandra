@@ -1,0 +1,258 @@
+#!/bin/bash
+
+# Rename files with unique names
+# Author: Georgi Kovachev
+  Version=1.0.2
+
+# This program sets unique names for files.
+
+set -e ; sync
+PATH=/bin:/usr/bin
+
+ME=$(basename "$0")				# program name as invoked
+SELF=$(readlink -ve "$0") || exit 1		# /full/path/to/program
+SELFDIR=$(dirname   "$SELF")			# /full/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------
+start='10000000'		# start value
+inc='100'			# increment value
+prefix='x'			# digit prefix (the first symbols)
+digits=8			# digit count - NOT used
+suffix='-'			# digit suffix (right before the original name)
+preserve_mtd='yes'		# preserve the original name (yes|no|"count chars to be removed")
+# configuration end =========
+
+
+# global variables start ----
+es=0				# exit status
+cmd=''				# command
+dst=''				# destination directory
+index=0				# unique number incremented by value
+# global variables end ======
+
+
+# load required files
+[ -f "${SELFDIR}/functions.sh"  -a  -r "${SELFDIR}/functions.sh" ] \
+	&& . "${SELFDIR}/functions.sh" || \
+	{
+		echo -n "$ME: FATAL ERROR: ${SELFDIR}/functions.sh"
+		echo " cannot be loaded. Aborting." >&2
+		exit 1
+	}
+
+
+# Checks input parameters
+# Input:  $@ - command line
+# Output: $cmd is set to appropriate value
+# Exit status: 0 if success, greater than 0 if error
+get_cmd_line_parameters ()
+{
+	local es=0
+
+# usage;
+# unamef  destination_dir  start  increment	# compare files
+
+# examples:
+# cmpf  .	dir
+# cmpf  /tmp	/var/local/../dir
+
+	case "$#" in
+		"1")
+			case "$1" in
+				--version)
+					cmd="$1"	# --version
+				;;
+				*)
+					cmd='rename'	# rename files
+					dst="$1"	# destination directory
+				;;
+			esac
+		;;
+		"3")
+			cmd='rename'			# rename files
+			dst="$1"			# destination directory
+			start="$2"			# start value
+			inc="$3"			# increment value
+		;;
+		*)
+			es=2
+		;;
+	esac
+
+	return $es
+}
+
+
+# Checks if the configuration can satisfy the requirements
+# Input:  None
+# Output: None
+# Exit status: 0 if success, greater than 0 if error
+config_check ()
+{
+# If option -m is not supported by readlink command, use option -f
+	readlink_m_f ()
+	{
+		local res=''
+
+		res=$(readlink -m "$1" 2>/dev/null) || \
+		res=$(readlink -f "$1" 2>/dev/null) || return 1
+
+		echo "$res"
+	}
+
+	case "$cmd" in
+		rename)
+			dst=$(readlink_m_f "$dst") || return 11
+		;;
+		--version)	:	;;
+		*)	return 19	;;
+	esac
+	return 0
+}
+
+
+get_unique_name ()
+{
+	local fn="$1" mtd="$2" res='' ext=''
+
+	ext=${fn#*.}
+	if [ "$ext" = "$fn" ]; then
+		ext=''
+	else
+		ext=".${ext}"
+	fi
+
+	case "$mtd" in				# preserve method
+		yes)
+			res="${prefix}${index}${suffix}${fn}"	# preserve file_name.ext
+		;;
+		no)
+			res="${prefix}${index}${suffix}${ext}"	# preserve extention only
+		;;
+		*)
+			# remove mtd count chars from the beginning of file name
+			mtd=$(str2int "$mtd") || return 31
+
+			res=${fn%%.*}
+			res=${res:mtd}
+			[ -z "$res" ] && res="$fn" || res="${res}${ext}"
+		;;
+	esac
+
+	echo "$res"
+}
+
+
+do_rename ()
+{
+	local keep_IFS=$IFS file='' dir='' list='' new_fname='' new_dir='' nf='' fld=''
+
+	index=$start			# unique number incremented by value
+	# create a list of all files to be renamed
+	IFS=$'\n'			# set input field separator to new line	
+	for file in $(ls -Rl --group-directories-first "$dst"); do
+		[ "$DEBUG" = '1' ] && echo "$file"
+	#	eval set -- "$file" 2>/dev/null || return 21		# do not use eval here
+		nf="$(echo "$file" | awk '{print NF}')" || return 21
+
+		case "$nf" in
+			1)
+				fld="$(echo "$file" | awk '{print $1}')" || return 22
+				dir=${fld%:}		# remove trailing ":"
+			;;
+			2)	:		;;
+			8)
+				# construct /full/path/to/file, add trailing new line (for files only)
+				fld="$(echo "$file" | awk '{print $8}')" || return 23
+				[ -f "${dir}/${fld}" ] &&\
+					list=${list}${dir}/${fld}${IFS}
+			;;
+			10)
+				# construct /full/path/to/file, add trailing new line (for files only)
+				fld="$(echo "$file" | awk '{print $8}')" || return 24
+				[ -L "${dir}/${fld}" ] &&\
+					list=${list}${dir}/${fld}${IFS}
+			;;
+			*)
+				[ "$DEBUG" = '1' ] && echo "$nf"
+				return 25
+			;;
+		esac
+	done
+
+	# get a temporary location
+	dir=$(mk_tmp_dir "$dst/$ME-" .tmp 8) || return 26	# create tmp directory
+
+	# rename and move all files to the tempotary location one by one
+	for file in $list; do
+		new_dir="$(dirname "${dir}${file#$dst}")"
+		new_fname="$(get_unique_name "$(basename "$file")" "$preserve_mtd")"
+		index=$((index + inc))			# increment unique value
+
+	#	echo $file
+	#	echo $new_fname
+
+		mkdir -p "$new_dir"
+		mv  -v  --backup=t  "$file"  "${new_dir}/${new_fname}"
+	done
+
+	# return all files to the original location one by one
+	sync
+	for file in $(find "$dir"); do
+		! [ -f "$file" ] && continue
+		mv  -v  --backup=t  "$file"  "$dst${file#$dir}"
+	done
+
+	rm -fr "$dir"					# remove tmp directory
+
+	IFS=$keep_IFS
+}
+
+
+get_cmd_line_parameters "$@" && config_check || \
+	{
+		es=$?
+		cmd="invalid input, show -usage-"
+	}
+
+
+# move up to action: do what is needed
+sync
+case "$cmd" in
+	rename)
+		echo ''
+		echo "$ME: Renaming files:"
+		echo "$ME: Destination:      $dst"
+		echo "$ME: Start value:      $start"
+		echo "$ME: Increment value:  $inc"
+		echo ''
+		echo -n "    OK to proceed? [Yes|No] (default No): "
+		if [ "$(read ans; echo "$ans")" != "Yes" ]; then
+			echo ''
+			echo "$ME: Terminating..."
+			echo ''
+			sync
+			exit 0
+		fi
+		echo ''
+		do_rename
+		echo "Done."
+		echo ''
+	;;
+
+	--version)
+		echo "$ME version: $Version"
+	;;
+
+	*)
+		echo '' >&2
+		echo "Usage: $0 destination_directory [start_value] [increment_value]" >&2
+		echo '' >&2
+	;;
+esac
+
+sync
+exit $es
+

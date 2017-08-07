@@ -1,0 +1,84 @@
+#!/bin/sh -e
+
+# Shell script for mounting data directory
+# Author: Georgi Kovachev
+  Version=1.0.4
+
+# 
+# 
+# 
+# 
+
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+ME=$(basename       -- "$0")			# program name as invoked
+SELF=$(readlink -ve -- "$0")			# /full/path/to/program
+SELFDIR=$(dirname   "$SELF")			# /full/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------
+# configuration end =========
+
+
+# global variables start ----
+es=0				# exit status
+cmd=$1				# command
+# global variables end ======
+
+
+. /lib/lsb/init-functions
+
+
+log_daemon_msg "$ME: Entering in handler..."
+
+do_start ()
+{
+	log_daemon_msg "$ME: Mounting data directory..."
+	sleep 1
+	swapon -a
+
+	sleep 1
+	cryptdisks_start data-media
+
+	sleep 1
+	mount -a
+
+	sleep 1
+	mount /media/data
+
+	sleep 1
+	mount /home
+
+	sleep 1
+	log_daemon_msg "$ME: Done."
+}
+
+
+case "$cmd" in
+	start)
+		do_start
+	;;
+	stop)
+		:
+	;;
+	restart|reload|force-reload)
+		:
+	;;
+	status)
+		:
+	;;
+	--version)
+		echo "$ME $Version"
+	;;
+	*)
+		echo -n "Usage: $0 {start|stop|restart|reload|force-reload" >&2
+		echo "|status|--version}" >&2
+		exit 1
+	;;
+esac
+
+
+exit $es
+

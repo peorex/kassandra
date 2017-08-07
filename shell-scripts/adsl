@@ -1,0 +1,74 @@
+#!/bin/sh
+
+# Shell script for ADSL connection
+# Author: Georgi Kovachev
+  Version=1.0.3
+
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+ME=$(basename "$0")		# program name as invoked
+
+
+# Must be root
+if [ "$(/usr/bin/id -u)" != 0 ] ; then
+	echo -e "$ME: You must be root to run this script.\n" >&2
+	exit 1
+fi
+
+
+do_start ()
+{
+	sleep 10
+	route del default &>/dev/null		# because of bug in adsl-start
+	/usr/sbin/adsl-start
+}
+
+do_stop ()
+{
+	/usr/sbin/adsl-stop
+}
+
+do_status ()
+{
+	/usr/sbin/adsl-status
+}
+
+
+case "$1" in
+	start)
+		echo -n "$ME: Starting ADSL connection... "
+		do_start
+	;;
+
+	stop)
+ 		echo -n "$ME: Stopping ADSL connection... "
+		do_stop
+	;;
+
+	restart|reload|force-reload)
+		echo -n "$ME: Restarting ADSL connection... "
+		do_stop
+		sleep 1
+		do_start
+	;;
+
+	status)
+		echo "$ME: Status of ADSL connection:"
+		do_status
+	;;
+
+	--version)
+		echo -e "$ME version: $Version \n"
+	;;
+
+	*)
+		echo -n "Usage: $0 {start|stop|restart|reload|force-reload" >&2
+		echo "|status|--version}" >&2
+		exit 1
+	;;
+esac
+
+
+exit 0
+
+

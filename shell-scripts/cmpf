@@ -1,0 +1,177 @@
+#!/bin/bash
+
+# Search for equal files
+# Author: Georgi Kovachev
+  Version=1.0.1
+
+# This program searches for equal files.
+
+set -e ; sync
+PATH=/bin:/usr/bin
+
+ME=$(basename "$0")				# program name as invoked
+SELF=$(readlink -ve "$0") || exit 1		# /full/path/to/program
+SELFDIR=$(dirname   "$SELF")			# /full/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------
+size=64				# string length
+# configuration end =========
+
+
+# global variables start ----
+es=0				# exit status
+cmd=''				# command
+src=''				# source directory
+dst=''				# destination directory
+# global variables end ======
+
+
+# load required files
+[ -f "${SELFDIR}/functions.sh"  -a  -r "${SELFDIR}/functions.sh" ] \
+	&& . "${SELFDIR}/functions.sh" || \
+	{
+		echo -n "$ME: FATAL ERROR: ${SELFDIR}/functions.sh" >&2
+		echo " cannot be loaded. Aborting." >&2
+		exit 1
+	}
+
+
+# Checks input parameters
+# Input:  $@ - command line
+# Output: $cmd is set to appropriate value
+# Exit status: 0 if success, greater than 0 if error
+get_cmd_line_parameters ()
+{
+	local es=0
+
+# usage;
+# cmpf  source_dir	destination_dir			# compare files
+
+# examples:
+# cmpf  .	dir
+# cmpf  /tmp	/var/local/../dir
+
+	case "$#" in
+		"1")
+			cmd="$1"		# --version | --help
+		;;
+		"2")
+			cmd='compare'		# compare files
+			src="$1"		# source directory
+			dst="$2"		# destination directory
+		;;
+		*)
+			es=2
+		;;
+	esac
+
+	return $es
+}
+
+
+# Checks if the configuration can satisfy the requirements
+# Input:  None
+# Output: None
+# Exit status: 0 if success, greater than 0 if error
+config_check ()
+{
+# If option -m is not supported by readlink command, use option -f
+	readlink_m_f ()
+	{
+		local res=''
+
+		res=$(readlink -m "$1" 2>/dev/null) || \
+		res=$(readlink -f "$1" 2>/dev/null) || return 1
+
+		echo "$res"
+	}
+
+	case "$cmd" in
+		compare)
+			src=$(readlink_m_f "$src") || return 11
+			dst=$(readlink_m_f "$dst") || return 12
+		;;
+		--version)	:	;;
+		*)	return 19	;;
+	esac
+	return 0
+}
+
+
+do_compare ()
+{
+	local keep_IFS=$IFS size='' s_file='' d_file='' flag='' file='' list='' exist=''
+
+	IFS=$'\n'			# set input field separator to new line	
+	for s_file in $(find "$src"); do
+		! [ -f "$s_file" ] && continue
+		size="$(ls -l "$s_file" | awk '{print $5}')"
+
+		flag=0
+		for d_file in $(find "$dst" -size ${size}c); do
+			! [ -f "$d_file" ] && continue
+			[ "$s_file" = "$d_file" ] && continue
+
+			exist=0
+			for file in $list; do
+				[ "$file" = "$s_file" ] && exist=$((exist + 1))
+				[ "$file" = "$d_file" ] && exist=$((exist + 1))
+			done
+			[ $exist -eq 2 ] && continue
+
+			cmp "$s_file" "$d_file" &>/dev/null || continue
+
+			if [ $flag -eq 0 ]; then
+				flag=1
+				echo "Source file:      $s_file"
+				list=${list}${s_file}${IFS}
+			fi
+			echo "Destination file: $d_file"
+			list=${list}${d_file}${IFS}
+
+		done
+		[ $flag -ne 0 ] && echo ''
+	done
+
+	IFS=$keep_IFS
+}
+
+
+
+get_cmd_line_parameters "$@" && config_check || \
+	{
+		es=$?
+		cmd="invalid input, show -usage-"
+	}
+
+
+# move up to action: do what is needed
+sync
+case "$cmd" in
+	compare)
+		echo ''
+		echo "$ME: Comparing files:"
+		echo "$ME: Source:       $src"
+		echo "$ME: Destination:  $dst"
+		echo ''
+		do_compare
+		echo "Done."
+		echo ''
+	;;
+
+	--version)
+		echo "$ME version: $Version"
+	;;
+
+	*)
+		echo '' >&2
+		echo "Usage: $0 source_directory destination_directory" >&2
+		echo '' >&2
+	;;
+esac
+
+sync
+exit $es
+

@@ -1,0 +1,424 @@
+#!/bin/bash
+
+# Create/restore system backup
+# Author: Georgi Kovachev
+  Version=1.1.1
+
+# Creates uncompressed system backup using tar
+# or by copy system tree.
+# Filesystems involved must be mounted.
+
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+ME=$(basename "$0")				# program name as invoked
+SELF=$(readlink -ve "$0") || exit 1		# /full/path/to/program
+SELFDIR=$(dirname   "$SELF")			# /full/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+es=0			# exit status
+action=''
+source=''
+destination=''
+mount_point=''
+mount_dev=''
+s_dev_msg=''		# source device message
+d_dev_msg=''		# destination device message
+
+
+# Must be root
+if [ "$(/usr/bin/id -u)" != 0 ] ; then
+	echo -e "$ME: You must be root to run this script.\n" >&2
+	exit 1
+fi
+
+
+# Checks input parameters
+# Input:  $@ - command line
+# Output: $action is set to appropriate value
+# Exit status: 0 if success, 1 if error
+get_cmd_line_parameters ()
+{
+	local es=0
+
+	action=$1		# --create	--restore	--copy
+	source=$2		# mountpoint	file		mountpoint
+	destination=$3		# file		mountpoint	mountpoint
+
+	if [ "$action" != "--version"  -a  "$action" != "--help" \
+		-o "$action" = "--copy" ]; then
+		if [ $# -gt 3 ]; then
+			echo "$ME: Too many parameters" >&2; es=1
+		fi
+		if [ $# -lt 3 ]; then
+			echo "$ME: Too few parameters" >&2; es=1
+		fi
+	fi
+
+	return $es
+}
+
+
+# Checks if the configuration satisfy the requirements
+# Input:  None
+# Output: None
+# Exit status: 0 if success, 1 if error
+config_check ()
+{
+	local tmp='' es=0
+
+	is_mountpoint ()
+	{
+		if mountpoint -d "$2" &>/dev/null; then
+			mount_dev=$(grep -E "$2" /etc/mtab | awk '{print $1}')
+			if [ -z "$mount_dev" ]; then
+				echo -e "$ME: FATAL ERROR. Aborting.\n" >&2
+				exit 1
+			fi
+
+			if [ "$1" = "Source" -a "$2" = '/' ]; then
+	echo "$ME: Error: Cannot create backup of root diractory (/)" >&2
+				es=1
+			fi
+			if [ "$1" = "Destination" -a "$2" = '/' ]; then
+	echo "$ME: Error: Cannot restore backup on root diractory (/)" >&2
+				es=1
+			fi
+		else
+			mount_dev=''
+			echo "$ME: Error: $1 $2 is not a mountpoint." >&2
+			es=1
+		fi
+	}
+
+# If option -m is not supported by readlink command, use option -f
+	readlink_m_f ()
+	{
+		local res=''
+
+		res=$(readlink -m "$1" 2>/dev/null) || \
+		res=$(readlink -f "$1" 2>/dev/null)
+
+		echo "$res"
+	}
+
+	source=$(readlink_m_f "$source")
+	destination=$(readlink_m_f "$destination")
+
+	if [ "$action" != "--version"  -a  "$action" != "--help" ]; then
+
+		if [ -z "$action" ]; then
+			echo "$ME: Error: No Command is spesified" >&2
+			es=1
+		fi
+		if [ -z "$source" ]; then
+			echo "$ME: Error: No Source is spesified" >&2
+			es=1
+		fi
+		if [ -z "$destination" ]; then
+			echo "$ME: Error: No Destination is spesified" >&2
+			es=1
+		fi
+	fi
+
+	case "$action" in
+		--create)
+			# verify source
+			is_mountpoint Source "$source"	# error if not mounted
+			s_dev_msg=\($mount_dev\)
+
+			# verify destination
+			destination=${destination%.tar}.tar	# tar format
+			if [ -e "$destination" ]; then
+	echo "$ME: Error: Destination $destination exists. Will NOT overwrite it!" >&2
+				es=1
+			fi
+		;;
+
+		--restore)
+			# verify source
+			source=${source%.tar}.tar		# tar format
+			if [ ! -f "$source" ]; then
+	echo "$ME: Error: Source file  $source  not found" >&2
+				es=1
+			else
+				if ! tar -tf "$source" &>/dev/null; then
+	echo "$ME: Error: File $source does not look like a tar archive" >&2
+					es=1
+				fi
+			fi
+
+			# verify destination
+			is_mountpoint Destination "$destination"	# error if not mounted
+			d_dev_msg=\($mount_dev\)
+		;;
+
+		--copy)
+			# verify source
+			is_mountpoint Source "$source"			# error if not mounted
+			s_dev_msg=\($mount_dev\)
+
+			# verify destination
+			is_mountpoint Destination "$destination"	# error if not mounted
+			d_dev_msg=\($mount_dev\)
+		;;
+
+		--version|--help)
+			:
+		;;
+
+		*)
+			if [ "$action" ];then
+				echo "$ME: Error: Illegal Command: $action" >&2
+				es=1
+			fi
+		;;
+	esac
+
+
+	if [ "$action" != "--version"  -a  "$action" != "--help" ]; then
+		if [ "$source"  -a  "$destination" ]; then
+			if [ "$source" = "$destination" ]; then
+				echo "$ME: Error: Source and Destination are the same" >&2
+				echo "$ME: Source		$source"
+				echo "$ME: Destination	$destination"
+				es=1
+			fi
+		fi
+	fi
+
+	return $es
+}
+
+
+modify_fstab ()
+{
+	local fstab_entry="$1" dev="$2" keep_IFS=$IFS i='' res='' root='' tmp='' uc=1 es=9
+
+	trim_beginning ()
+	{
+		# trim white space and '#' at the beginning
+		tmp=$(echo "$i" | sed 's/^[ \t#]*\(.*\)$/\1/')
+
+		# if commented - return 1
+		[ $(echo "$i" | sed -n '/^[ \t]*#.*/p') ] && return 1
+		return 0
+	}
+
+	IFS=$'\n'			# set input field separator to new line
+	for i in $fstab_entry; do
+		trim_beginning || continue			# if commented - continue
+
+		# if /dev/somedevice	/	etc.	etc.
+		if [ $(echo "$tmp" | awk '{print $2}') = '/' ]; then
+			root=$(echo "$tmp" | awk '{print $1}')	# /dev/somedevice
+			break
+		fi
+	done
+
+	[ "$root" = "$dev" ] && { echo "$fstab_entry"; return 0; }	# no changes needed
+	[ -z "$root" ] && return 8				# invalid fstab format
+
+	for i in $fstab_entry; do
+		if ! trim_beginning ; then			# if commented
+			# if /dev/somedevice	/	etc.	etc.
+			[ $(echo "$tmp" | awk '{print $2}') = '/' ] && tmp="skip_$root"
+
+			# if old root device - uncomment
+			[ $uc -ne 0 ] && [ $(echo "$tmp" | awk '{print $1}') = "$root" ] \
+				&& i="$tmp" && uc=0
+		else
+			# if /dev/somedevice	/	etc.	etc.
+			if [ $(echo "$tmp" | awk '{print $2}') = '/' ]; then
+				# set new root device
+				[ $es -ne 0 ] && i=$(echo "$i" | sed s#$root#$dev#) \
+					&& tmp="skip_$dev" && es=0
+			fi
+			# if new root device - comment
+			[ $(echo "$tmp" | awk '{print $1}') = "$dev" ] && i="# $tmp"
+
+			# if old root device uncommented - disable uncomment
+			[ $uc -ne 0 ] && [ $(echo "$tmp" | awk '{print $1}') = "$root" ] \
+				&& uc=0
+		fi
+		[ "$res" ] && res="${res}${IFS}$i" || res="$i"
+	done
+	echo "$res"
+
+	IFS=$keep_IFS
+	return $es
+}
+
+do_fstab_handler ()
+{
+	local fstab="$1" dev="$2" keep_IFS=$IFS fstab_entry='' i='' res='' es=0
+
+	[ -f "$fstab" ] || return 1	# is found?
+	# read input file
+	fstab_entry=$(sed 's/^\(.*\)/\1 1 2/' "$fstab") || return 2
+
+	IFS=$'\n'			# set input field separator to new line
+	for i in $fstab_entry; do
+		[ "$res" ] && res="${res}${IFS}$i" || res="$i"
+	done
+
+	fstab_entry=$(modify_fstab "$res" "$dev") || return $?
+
+	# write output file
+	rm -f "${fstab}.part"		|| return 3
+	IFS=$'\n'			# set input field separator to new line
+	for i in $fstab_entry; do
+		echo "$i" | sed 's/....$//' >> "${fstab}.part" || return 4
+	done
+	rm -f "${fstab}.bak"		|| return 5
+	mv "$fstab" "${fstab}.bak"	|| return 6
+	mv "${fstab}.part" "$fstab"	|| return 7
+
+	IFS=$keep_IFS
+	return 0
+}
+
+do_fstab ()
+{
+	do_fstab_handler "$destination/etc/fstab" "$mount_dev" || es=$?
+
+	echo
+	case "$es" in
+		"0")
+			echo "$ME: File  fstab  adjusted successfully."
+		;;
+		"1")
+			echo "$ME: WARNING: Cannot find file  fstab. Adjust manualy."
+			echo "$ME: WARNING: Otherwise your system may be  Unbootable!"
+		;;
+		"8"|"9")
+			echo "$ME: WARNING: Invalid  fstab  format. Adjust manualy."
+			echo "$ME: WARNING: Otherwise your system may be  Unbootable!"
+		;;
+		*)
+			echo "$ME: FARAL ERROR  while proceeding file  fstab."
+			echo "$ME: Adjust manualy."
+			echo "$ME: Otherwise your system may be  Unbootable!"
+		;;
+	esac
+	echo "$ME: Used  fstab: $destination/etc/fstab"
+
+	[ $es -ne 0 ] && es=$(($es + 10)) || :
+}
+
+
+do_create ()
+{
+	if [ ! -d $(dirname "$destination") ]; then
+		mkdir -p $(dirname "$destination")
+	fi
+	sync
+	cd "$source"			# /path/to/directory/for/backup
+	tar cvf "$destination" *	# /path/to/backup/file/filename.tar
+	sync
+}
+
+do_restore ()
+{
+	sync
+	cd "$destination"		# /path/to/directory/to/restore
+	rm -fr *
+
+	sync
+	tar xvf "$source"		# /path/to/backup/file/filename.tar
+	sync
+	do_fstab
+	sync
+}
+
+do_copy ()
+{
+	sync
+	cd "$destination"		# /path/to/directory/to/restore
+	rm -fr *
+
+	sync
+	cd "$source"			# /path/to/source/directory
+	tar c * | tar xv -C "$destination"	# /path/to/$destination/directory
+	sync
+	do_fstab
+	sync
+}
+
+
+##############################
+
+echo
+# check input parameters
+get_cmd_line_parameters "$@" || es=1
+
+# can the configuration satisfy the requirements?
+config_check || es=1
+
+
+if [ $es -eq 0 ]; then
+	if [ "$action" = "--create"  -o  "$action" = "--restore" \
+		-o "$action" = "--copy" ]; then
+		echo "$ME: Summary:"
+		echo "    Action:       ${action#??}"
+		echo "    Source        $source 	$s_dev_msg"
+		echo "    Destination:  $destination 	$d_dev_msg"
+		echo ''
+		echo -n "    OK to proceed? [Yes|No] (default No): "
+		if [ "$(read; echo "$REPLY")" != "Yes" ]; then
+			echo -e "\n$ME: Terminating... \n"
+			sync
+			exit 0
+		fi
+		echo
+	fi
+else
+	action="invalid input, show -usage-"
+	echo -e "$ME: ERRORS FOUND\n" >&2
+fi
+
+
+# all checks are now done, there must be no errors
+# all exit codes are expected do be 0 - exit if not so
+set -e
+
+
+# move up to action: do what is needed
+case "$action" in
+	--create)
+		echo "$ME: Creating System Backup..."
+		sleep 1
+		time do_create
+		echo "Done."
+	;;
+
+	--restore)
+ 		echo "$ME: Restoring System from Backup..."
+		sleep 1
+		time do_restore
+		echo "Done."
+	;;
+
+	--copy)
+ 		echo "$ME: Copying System tree..."
+		sleep 1
+		time do_copy
+		echo "Done."
+	;;
+
+	--version)
+		echo "$ME version: $Version"
+	;;
+
+	*)
+		echo "Usage: $0 --create  source-mountpoint  destination_file" >&2
+		echo "Usage: $0 --restore  source_file  destination-mountpoint" >&2
+		echo "Usage: $0 --copy  source-mountpoint  destination-mountpoint" >&2
+		[ "$action" = "--help" ] || es=1
+	;;
+esac
+echo
+
+
+exit $es
+

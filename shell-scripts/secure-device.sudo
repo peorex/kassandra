@@ -1,0 +1,105 @@
+#!/bin/bash -e
+
+# Menages a secure device
+# Author: Georgi Kovachev
+  Version=1.0.6
+
+# This is a system program used to create, mount and unmount
+# a secure device
+# The secure device is used for sensitive information storage
+# It utilizes an encrypted filesystem contained in a file
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+sync
+ME=$(basename       -- "$0")			# program name as invoked
+SELF=$(readlink -ve -- "$0")			# /absolute/path/program
+SELFDIR=$(dirname   "$SELF")			# /absolute/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------------------------
+config_file=${SELF}.conf			# depends on program location and name
+min_size=128					# [KB] + offset
+min_size_ext3=2048				# [KB] + offset
+offset=32					# [512B] (in sectors), for cryptsetup
+offset_loop=16384				# [B] (in bytes), for loop
+cipher='aes-cbc-essiv:sha256'			# AES
+
+
+
+
+options=''					# global options
+log_opts=''					# write options to log file
+LOGFILE='/var/log/kassandra/kassandra.log'	# general log file for kassandra utilities
+LOGPREFIX='cmd=$cmd es=$es'			# log message prefix
+LOGSUFFIX='USER=$USER SUDO_USER=$SUDO_USER'	# log message suffix
+VERBOSE=''					# 0 - never, 2 - disable, 7 - enable, 9 - max
+EXECUTE=''					# 0 - never, 2 - disable, 7 - enable, 9 - max
+# configuration end ===========================
+
+# global variables start ----------------------
+es=0						# exit status
+cmd=$1						# command
+
+action=''					# what to do? TBC
+mount_file=''					# contains encrypted file system
+mount_point=''					# encrypted file system mount point
+fs_type=''					# file system type
+fs_opts=''					# file system options
+size=''						# entire volume size
+fs=''						# file_name only
+chown_dis=''					# change ownership disable (msdos, vfat)
+mount_opts=''					# mount options
+
+
+
+
+# global variables end ========================
+
+
+# load general functions
+f=${SELFDIR}/lib/functions.sh
+[ -f "$f"  -a  -r "$f" ] && . "$f"	|| \
+{ echo "$ME: FATAL ERROR: $f cannot be loaded. Aborting." >&2 ; exit 1 ; }
+
+# load required files
+# load_libs  lib/encryption-functions.sh
+load_libs  ${SELF}-functions.sh  ${SELF}-do-functions.sh
+
+# embeded functions go here
+
+load_libs -f  ${SELF}-dev-functions.sh -- "$@"	# for development purposes
+
+log Load: \$@="$@"				# log load parameters
+
+case "$1" in
+	--version)		version	;;	# exits with status 0
+	--help | --usage)	usage	;;	# exits with status 0
+esac
+
+must_be_root					# root permissions required - exit if not granted
+getoptions "$options" "$@"	&& shift $((OPTIND-1))	|| es=2
+init "$@"			|| es=$?
+
+log Init: "$(eval echo "$log_opts")" \$@="$@"	# log decoded parameters
+
+feedback --on-load		|| es=$?
+[ $es -eq 0 ]			|| exit $es
+
+# move up to action: do what is needed
+sync
+case "$cmd" in
+	create | mount | umount)
+		do_$cmd "$@"
+	;;
+	*)
+		usage 1
+	;;
+esac
+feedback --on-exit
+
+log Exit:					# log exit status
+
+sync
+exit $es
+

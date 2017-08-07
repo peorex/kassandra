@@ -1,0 +1,105 @@
+#!/bin/sh -e
+
+# Create catalog of directory contents
+# Author: Georgi Kovachev
+  Version=1.0.0
+
+# Catalog is maintained in plain text format in files
+# File names are the same as volume names
+# Database directory is set in config file
+# Based on 'find' and 'grep' commands
+
+PATH=/bin:/usr/bin
+sync
+ME=$(basename       -- "$0")			# program name as invoked
+SELF=$(readlink -ve -- "$0")			# /absolute/path/program
+SELFDIR=$(dirname   "$SELF")			# /absolute/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------------------------
+config_file=~/.kassandra/${SELFNAME}.conf	# important! /home/user/.pkg/progname.conf
+db_dir=~/"sd/$SELFNAME/${SELFNAME}.db"		# database directory (default), set in config
+
+
+
+
+
+
+
+
+options='Il:nvV'				# global options
+log_opts='I=$I l="$l" n=$n v=$v V=$V'		# write options to log file
+LOGFILE='/var/log/kassandra/kassandra.log'	# general log file for kassandra utilities
+LOGPREFIX='cmd=$cmd es=$es'			# log message prefix
+LOGSUFFIX='USER=$USER SUDO_USER=$SUDO_USER'	# log message suffix
+VERBOSE=''					# 0 - never, 2 - disable, 7 - enable, 9 - max
+EXECUTE=''					# 0 - never, 2 - disable, 7 - enable, 9 - max
+# configuration end ===========================
+
+# global variables start ----------------------
+es=0						# exit status
+cmd=$1						# command
+
+label=''					# volume label
+directory=''					# destination directory
+verbose=''					# verbose from config file
+verb=''						# verbose final (options v, V, verbose)
+
+
+
+
+
+
+
+
+
+# global variables end ========================
+
+
+# load general functions
+f=${SELFDIR}/lib/functions.sh
+[ -f "$f"  -a  -r "$f" ] && . "$f"	|| \
+{ echo "$ME: FATAL ERROR: $f cannot be loaded. Aborting." >&2 ; exit 1 ; }
+
+# load required files
+# load_libs  lib/encryption-functions.sh
+load_libs  ${SELF}-functions.sh  ${SELF}-do-functions.sh
+
+# embeded functions go here
+
+load_libs -f  ${SELF}-dev-functions.sh -- "$@"	# for development purposes
+
+log Load: \$@="$@"				# log load parameters
+
+case "$1" in
+	--version)		version	;;	# exits with status 0
+	--help | --usage)	usage	;;	# exits with status 0
+esac
+
+# must_be_root					# root permissions required - exit if not granted
+getoptions "$options" "$@"	&& shift $((OPTIND-1))	|| es=2
+init "$@"			|| es=$?
+
+log Init: "$(eval echo "$log_opts")" \$@="$@"	# log decoded parameters
+
+feedback --on-load		|| es=$?
+[ $es -eq 0 ]			|| exit $es
+
+# move up to action: do what is needed
+sync
+case "$cmd" in
+	add | remove | find)
+		do_$cmd "$@"	|| es=$?
+	;;
+	*)
+		usage 1
+	;;
+esac
+feedback --on-exit
+
+log Exit:					# log exit status
+
+sync
+exit $es
+

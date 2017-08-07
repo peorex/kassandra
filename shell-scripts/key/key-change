@@ -1,0 +1,115 @@
+#!/bin/sh -e
+
+# Change keys for disks encryption
+# Author: Georgi Kovachev
+  Version=1.1.3
+
+# Called at startup
+# Change keys on all available devices
+# Do not fallback to PASSWORD mode.
+#
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+# sync
+ME=$(basename       -- "$0")			# program name as invoked
+SELF=$(readlink -ve -- "$0")			# /absolute/path/program
+SELFDIR=$(dirname   "$SELF")			# /absolute/path
+SELFNAME=$(basename "$SELF")			# program (true name)
+
+
+# configuration start -------------------------
+key_script=''					# encryption key manager (found from /etc/crypttab)
+# configuration end ===========================
+
+
+# global variables start ----------------------
+es=0						# exit status
+cmd=$1						# command
+# global variables end ========================
+
+
+must_be_root ()
+{
+	if [ "$(/usr/bin/id -u)" != "0" ]; then
+		echo "$ME: You must be root to run this script." >&2
+		exit 1
+	fi
+}
+
+version ()
+{
+	echo "$ME $Version"
+	exit 0
+}
+
+find_key_script ()
+{
+	local crypttab key_script name f1 f2 f3 f4 rest
+
+	crypttab='/etc/crypttab'
+	[ -f "$crypttab"  -a  -r "$crypttab" ]			|| return 2
+
+	while read f1 f2 f3 f4 rest ; do
+		[ -n "$f1"  -a  "${f1#'#'}" = "$f1" ]		|| continue
+		key_script=${f4#*keyscript=}
+		[ "$key_script" != "$f4" ]			|| continue
+		name=${f4%$key_script}
+		[ "${name##*,}" = 'keyscript=' ]		|| continue
+		key_script=${key_script%%,*}
+
+		[ -n "$key_script"  -a  -f "$key_script"  -a  \
+		  -r "$key_script"  -a  -x "$key_script" ] && \
+			echo -n "$key_script"	&& return 0
+	done < "$crypttab"
+	return 1
+}
+
+do_start ()
+{
+	key_script=$(find_key_script) && exec "$key_script"
+}
+
+usage ()
+{
+	echo "
+Usage:
+$ME  {start|stop|restart|reload|force-reload|status|--version|--help}
+	" >&2
+	[ $es -eq 0 ] && exit "${1:-0}"	|| exit $es
+}
+
+case "$1" in
+	--version)		version	;;	# exits with status 0
+	--help | --usage)	usage	;;	# exits with status 0
+esac
+
+must_be_root					# root permissions required - exit if not granted
+# getoptions ${options:-':'} "$@"	&& shift $((OPTIND-1))	|| es=2
+# init "$@"			|| es=$?
+# feedback --on-load		|| es=$?
+[ $es -eq 0 ]			|| exit $es
+
+# move up to action: do what is needed
+# sync
+case "$cmd" in
+	start)
+		do_start
+	;;
+	stop)
+		:
+	;;
+	restart | reload | force-reload)
+		:
+	;;
+	status)
+		:
+	;;
+	*)
+		usage 1
+	;;
+esac
+# feedback --on-exit
+
+# sync
+exit $es
+

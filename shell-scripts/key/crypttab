@@ -1,0 +1,20 @@
+# /etc/crypttab: encrypted file system information
+
+# Vesrion:	1.2.8
+
+# The swap may be used as either encrypted or unencrypted. The unenctypted swap is usefull for fresh installations.
+# The swap page is usually 4KiB or 8KiB. The first page of the swap holds system data.
+# Offset is set in 512B sectors. Skip the first page because of unencrypted version.
+# More than sufficient extra space is provided.
+# 4KiB / 512B = 8 sectors
+#
+# location: kassandra/key/crypttab	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+# <target name>	<source device>		<key file>	<options>					<note>
+cswap-hda3	/dev/sda3		/dev/urandom	cipher=aes-cbc-essiv:sha256,offset=8,swap	# encrypted swap
+cswap-hdc3	/dev/sdb3		/dev/urandom	cipher=aes-cbc-essiv:sha256,offset=8,swap	# encrypted swap
+
+cdata-hdc5	/dev/sdb5		usb1,fd1	luks,keyscript=/etc/kassandra/key/key.sh	# encrypted data
+
+
